@@ -2,19 +2,40 @@
 
 #define RXD2 4
 #define TXD2 15
+#define DIR_PIN 2  // ตามไดอะแกรม ขา DIR ต่ออยู่กับ IO2
 
 ModbusMaster node;
 
+// ฟังก์ชันสั่งเปิดโหมดส่ง (Transmit) ก่อนส่งข้อมูลออกไป
+void preTransmission() {
+  digitalWrite(DIR_PIN, HIGH);
+}
+
+// ฟังก์ชันสั่งปิดโหมดส่ง กลับเป็นโหมดรับ (Receive) เมื่อส่งเสร็จ
+void postTransmission() {
+  digitalWrite(DIR_PIN, LOW);
+}
+
 unsigned long lastReadTime = 0;
-const long readInterval = 5000; // อ่านทุกๆ 5 วินาที
+const long readInterval = 3000; // อ่านทุกๆ 3 วินาที
 
 void setup() {
   Serial.begin(115200);
+  
+  // ตั้งค่าขา DIR เป็น Output และตั้งค่าเริ่มต้นให้อยู่โหมดรับ (LOW)
+  pinMode(DIR_PIN, OUTPUT);
+  digitalWrite(DIR_PIN, LOW);
+
+  // เริ่มต้น Serial2
   Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
   
   node.begin(20, Serial2); // Slave ID 20
   
-  Serial.println("ESP32 Modbus Master Initialized.");
+  // ลงทะเบียนฟังก์ชันควบคุมทิศทางให้กับ ModbusMaster
+  node.preTransmission(preTransmission);
+  node.postTransmission(postTransmission);
+  
+  Serial.println("ESP32 Modbus Master Initialized with DIR Control on IO2.");
 }
 
 void loop() {
@@ -23,41 +44,52 @@ void loop() {
   if (currentMillis - lastReadTime >= readInterval) {
     lastReadTime = currentMillis;
 
-    // สมมติว่าตอนนี้เราอ่านมาสัก 4 Registers (0x0000 ถึง 0x0003) 
-    // โดย 0x0000-0x0001 เป็น Temperature และ 0x0002-0x0003 น่าจะเป็น Humidity (หรือตัวถัดไป)
-    uint8_t result = node.readInputRegisters(0x0000, 4);
-
-    if (result == node.ku8MBSuccess) {
-      Serial.println("\n--- Read Success ---");
-
-      // แปลง Register 0 และ 1 ให้เป็น Float (Temperature)
+    // --- 1. อ่านค่าอุณหภูมิ (2 Registers เริ่มที่ 0x0000) ---
+    uint8_t resultTemp = node.readInputRegisters(0x0000, 2);
+    
+    if (resultTemp == node.ku8MBSuccess) {
       union {
         float f;
         uint16_t raw[2];
       } tempVal;
 
-      // จัดเรียง High/Low word (ถ้าค่าเพี้ยนลองสลับ index 0 กับ 1 ดูครับ)
       tempVal.raw[1] = node.getResponseBuffer(0); 
       tempVal.raw[0] = node.getResponseBuffer(1); 
-      float temp = tempVal.f;
+      //float temp = tempVal.f;
+      float temp = ((tempVal.raw[1]*256 + tempVal.raw[0]));
 
-      // แปลง Register 2 และ 3 ให้เป็น Float (Humidity - สมมติว่าอยู่ถัดไป)
+      Serial.print("Temperature: "); 
+      Serial.print(temp, 2); 
+      Serial.println(" °C");
+    } else {
+      Serial.print("Read Temp Failed! Error: 0x");
+      Serial.println(resultTemp, HEX);
+    }
+
+    // หน่วงเวลาสั้นๆ ระหว่างคำสั่ง
+    delay(100);
+
+    // --- 2. อ่านค่าความชื้น (2 Registers ถัดมา เริ่มที่ 0x0002) ---
+    uint8_t resultHum = node.readInputRegisters(0x0002, 2);
+    
+    if (resultHum == node.ku8MBSuccess) {
       union {
         float f;
         uint16_t raw[2];
       } humVal;
 
-      humVal.raw[1] = node.getResponseBuffer(2); 
-      humVal.raw[0] = node.getResponseBuffer(3); 
-      float humidity = humVal.f;
-
-      Serial.print("Temperature: "); Serial.print(temp); Serial.println(" °C");
-      Serial.print("Humidity:    "); Serial.print(humidity); Serial.println(" %RH");
+      humVal.raw[1] = node.getResponseBuffer(0); 
+      humVal.raw[0] = node.getResponseBuffer(1); 
+      //float humidity = humVal.f;
+      float humidity = ((humVal.raw[1]*256 + humVal.raw[0]));
+      Serial.print("Humidity:   "); 
+      Serial.print(humidity, 2); 
+      Serial.println(" %RH");
       Serial.println("--------------------");
-
     } else {
-      Serial.print("Read Failed! Error Code: 0x");
-      Serial.println(result, HEX);
+      Serial.print("Read Hum Failed! Error: 0x");
+      Serial.println(resultHum, HEX);
+      Serial.println("--------------------");
     }
   }
 }
