@@ -57,7 +57,7 @@ void setup() {
 
   Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
 
-  node.begin(20, Serial2);
+  node.begin(60, Serial2);
   node.preTransmission(preTransmission);
   node.postTransmission(postTransmission);
 
