@@ -1,0 +1,290 @@
+
+const rows = msg.payload;
+
+if (!Array.isArray(rows) || rows.length === 0) {
+    node.warn("No hourly sensor data");
+    return null;
+}
+
+const d = rows[0];
+
+// ===== Message Source =====
+// Cron Plus ส่ง topic1 ตามการตั้งค่าปัจจุบัน
+const source =
+    msg.topic === "topic1" ? "cron" : "manual";
+
+// ===== Station Configuration =====
+const latitude = 13.725986;
+const longitude = 100.772858;
+const timezone = 7;
+
+// Elevation above sea level (m)
+const elevation = 4.8;
+
+// Wind sensor height above ground (m)
+// แก้ตามความสูงติดตั้งจริง
+const windHeight = 2.55;
+
+// ===== Sensor Data =====
+const T = Number(d.temperature);
+const RH = Number(d.humidity);
+const P = Number(d.pressure);
+const wind = Number(d.wind_speed);
+const solar = Number(d.solar_radiation);
+const samples = Number(d.sample_count);
+
+if (
+    [T, RH, P, wind, solar].some(v => !Number.isFinite(v)) ||
+    RH < 0 || RH > 100 ||
+    P <= 0 || wind < 0 || solar < 0
+) {
+    node.error("Invalid hourly sensor data", msg);
+    return null;
+}
+
+// ===== Time =====
+const start = new Date(d.period_start);
+
+if (!Number.isFinite(start.getTime())) {
+    node.error("Invalid period_start", msg);
+    return null;
+}
+
+const local = new Date(
+    start.getTime() + timezone * 3600000
+);
+
+const year = local.getUTCFullYear();
+
+const J = Math.floor(
+    (
+        Date.UTC(
+            year,
+            local.getUTCMonth(),
+            local.getUTCDate()
+        ) - Date.UTC(year, 0, 1)
+    ) / 86400000
+) + 1;
+
+const hour =
+    local.getUTCHours() +
+    local.getUTCMinutes() / 60;
+
+const midHour = hour + 0.5;
+
+const rad = Math.PI / 180;
+const phi = latitude * rad;
+
+// ===== Vapor Pressure =====
+
+// Saturation vapor pressure (kPa)
+const es = 0.6108 * Math.exp(
+    (17.27 * T) / (T + 237.3)
+);
+
+// Actual vapor pressure (kPa)
+const ea = es * RH / 100;
+
+// Slope of saturation vapor pressure curve
+const delta =
+    4098 * es / Math.pow(T + 237.3, 2);
+
+// Psychrometric constant
+const gamma = 0.000665 * P;
+
+// ===== Wind Speed =====
+
+// Convert measured wind speed to 2 m
+const u2 = wind * 4.87 /
+    Math.log(67.8 * windHeight - 5.42);
+
+// ===== Solar Radiation =====
+
+// W/m2 -> MJ/m2/hour
+const Rs = solar * 0.0036;
+
+// Net shortwave radiation
+const Rns = 0.77 * Rs;
+
+// ===== Solar Geometry =====
+
+// Inverse relative Earth-Sun distance
+const dr =
+    1 + 0.033 * Math.cos(2 * Math.PI * J / 365);
+
+// Solar declination
+const declination =
+    0.409 * Math.sin(
+        2 * Math.PI * J / 365 - 1.39
+    );
+
+// Seasonal correction
+const b = 2 * Math.PI * (J - 81) / 364;
+
+const Sc =
+    0.1645 * Math.sin(2 * b)
+    - 0.1255 * Math.cos(b)
+    - 0.025 * Math.sin(b);
+
+// FAO-56 west-positive longitude convention
+const Lm = -longitude;
+const Lz = -15 * timezone;
+
+// Solar time at midpoint of hour
+const solarTime =
+    midHour + 0.06667 * (Lz - Lm) + Sc;
+
+// Solar time angle
+const omega =
+    Math.PI / 12 * (solarTime - 12);
+
+// Sunset hour angle
+const omegaS = Math.acos(
+    Math.max(
+        -1,
+        Math.min(
+            1,
+            -Math.tan(phi) * Math.tan(declination)
+        )
+    )
+);
+
+// Beginning and end of hour
+const omega1 = Math.max(
+    -omegaS,
+    omega - Math.PI / 24
+);
+
+const omega2 = Math.min(
+    omegaS,
+    omega + Math.PI / 24
+);
+
+// ===== Extraterrestrial Radiation =====
+let Ra = 0;
+
+if (omega2 > omega1) {
+    Ra =
+        (12 * 60 / Math.PI) *
+        0.0820 *
+        dr *
+        (
+            (omega2 - omega1) *
+            Math.sin(phi) *
+            Math.sin(declination)
+
+            + Math.cos(phi) *
+            Math.cos(declination) *
+            (
+                Math.sin(omega2) -
+                Math.sin(omega1)
+            )
+        );
+}
+
+Ra = Math.max(0, Ra);
+
+// ===== Clear-Sky Radiation =====
+const Rso =
+    (0.75 + 2e-5 * elevation) * Ra;
+
+// ===== Net Radiation =====
+// เวอร์ชันนี้คำนวณ ET0 เฉพาะกลางวัน
+const isDaytime = Rso > 0.01;
+
+let Rnl = null;
+let Rn = null;
+let G = null;
+let ET0 = null;
+
+if (isDaytime) {
+
+    // Cloudiness correction
+    const ratio = Math.max(
+        0.3,
+        Math.min(1.0, Rs / Rso)
+    );
+
+    const cloudFactor =
+        1.35 * ratio - 0.35;
+
+    // Stefan-Boltzmann constant
+    const sigma = 2.043e-10;
+
+    // Net longwave radiation
+    Rnl =
+        sigma *
+        Math.pow(T + 273.16, 4) *
+        (0.34 - 0.14 * Math.sqrt(ea)) *
+        cloudFactor;
+
+    // Net radiation
+    Rn = Rns - Rnl;
+
+    // Soil heat flux (daytime)
+    G = 0.1 * Rn;
+
+    // ===== FAO-56 Hourly Penman-Monteith =====
+    const numerator =
+        0.408 * delta * (Rn - G)
+        + gamma *
+        (37 / (T + 273)) *
+        u2 *
+        (es - ea);
+
+    const denominator =
+        delta + gamma * (1 + 0.34 * u2);
+
+    ET0 = Math.max(
+        0,
+        numerator / denominator
+    );
+}
+
+// ===== Output =====
+msg.payload = {
+
+    // Identify message source
+    source: source,
+
+    period_start: d.period_start,
+    period_start_th: d.period_start_th,
+    last_sample_th: d.last_sample_th,
+
+    sample_count: samples,
+
+    latitude: latitude,
+    longitude: longitude,
+    elevation: elevation,
+    wind_height: windHeight,
+
+    day_of_year: J,
+
+    temperature: T,
+    humidity: RH,
+    pressure: P,
+    wind_speed: wind,
+    u2: u2,
+    solar_radiation: solar,
+
+    es: es,
+    ea: ea,
+    delta: delta,
+    gamma: gamma,
+
+    Rs: Rs,
+    Rns: Rns,
+    Ra: Ra,
+    Rso: Rso,
+    Rnl: Rnl,
+    Rn: Rn,
+    G: G,
+
+    ET0_mm_hour: ET0,
+
+    status: isDaytime
+        ? "daytime_calculated"
+        : "nighttime_requires_cloud_factor"
+};
+
+return msg;
