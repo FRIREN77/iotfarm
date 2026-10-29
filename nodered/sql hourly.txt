@@ -1,0 +1,56 @@
+
+msg.query = `
+WITH hour_window AS (
+    SELECT
+        date_trunc(
+            'hour',
+            NOW(),
+            'Asia/Bangkok'
+        ) - INTERVAL '1 hour' AS start_time,
+
+        date_trunc(
+            'hour',
+            NOW(),
+            'Asia/Bangkok'
+        ) AS end_time
+)
+
+SELECT
+    h.start_time AS period_start,
+
+    to_char(
+        h.start_time AT TIME ZONE 'Asia/Bangkok',
+        'YYYY-MM-DD HH24:MI:SS'
+    ) AS period_start_th,
+
+    to_char(
+        MAX(s.time) AT TIME ZONE 'Asia/Bangkok',
+        'YYYY-MM-DD HH24:MI:SS'
+    ) AS last_sample_th,
+
+    AVG(s.temperature) AS temperature,
+    AVG(s.humidity) AS humidity,
+    AVG(s.pressure) AS pressure,
+    AVG(s.wind_speed) AS wind_speed,
+    AVG(s.solar_radiation) AS solar_radiation,
+
+    COUNT(*) AS sample_count
+
+FROM hour_window h
+JOIN sensor_data s
+    ON s.time >= h.start_time
+    AND s.time < h.end_time
+
+WHERE
+    s.temperature IS NOT NULL
+    AND s.humidity IS NOT NULL
+    AND s.pressure IS NOT NULL
+    AND s.wind_speed IS NOT NULL
+    AND s.solar_radiation IS NOT NULL
+
+GROUP BY h.start_time
+
+ORDER BY h.start_time;
+`;
+
+return msg;
